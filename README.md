@@ -1,106 +1,119 @@
 # ortho32-mcp
 
-MCP Server for ORTHO32 — the nervous system that turns libraries into an OS.
+Deterministic stdio MCP server implemented in AWK.
 
-> **CLIENT of ORTHO services via `ORTHOServiceClient` → `ortho32-api` HTTP. NOT a backend.**
+This repository is intentionally small. The MCP server reads one JSON-RPC message per line from `stdin`, dispatches methods in AWK, and writes one JSON-RPC response per line to `stdout`.
 
-## Routing Planes
+Diagnostics go to `stderr`. `stdout` is protocol only.
 
-Four routing planes per `ORTHO32RoutingV6`:
+## Architecture
 
-1. **UI ROUTING** — what application/window should appear? (`ortho://app/*`, `ortho://workspace/*`)
-2. **INTENT ROUTING** — what operation does the human/agent want? (`ortho.agent_dispatch` via `IntentRouter`)
-3. **SERVICE ROUTING** — what backend performs it? (`build`, `test`, `verify`, `tensor`, `marketplace`)
-4. **FABRIC ROUTING** — what hardware block executes it? (`trace`, `device`, `fabric`)
-
-Results travel back upward: `Hardware -> Completion -> Service Event -> App Model -> Window -> Human`.
-
-## Invariants
-
-- `cycles` / `cycleNumber` are always `number` (integer) — **NEVER wall-clock ms**
-- `ortho_verify_theorem` status comes **only** from actual checker output (`CheckerOutput.status`), never string inference
-- `hardware.reset` requires elevated scope `hardware.reset` — default scope cannot self-escalate
-- All tool outputs are typed from `src/types.ts`, no raw string responses
-- `ortho_agent_dispatch` uses `IntentRouter` path, never mutates UI state
-
-## URL Scheme
-
-```
-ortho://app/terminal
-ortho://app/ide
-ortho://ide/file/rtl/fabric/arbiter.sv?line=184
-ortho://settings/security
-ortho://hardware/device/ortho0
-ortho://proof/rtl_deterministic
-ortho://trace/cycle/420
-ortho://workspace/fabric
-https://... -> Browser
+```text
+MCP client
+  -> JSON-RPC over stdio
+  -> bin/ortho32-mcp.awk
+  -> explicit method dispatch
+  -> deterministic AWK tools
+  -> JSON-RPC response on stdout
 ```
 
-Workspace stores **routes not UI objects** — replay on login reconstructs desktop.
+AWK is used as the primary runtime:
+
+```text
+record -> pattern/action -> deterministic transformation -> JSON result
+```
+
+The implementation demonstrates that AWK's record-oriented stream model is structurally compatible with MCP stdio message processing. It does not claim AWK is inherently an MCP language, and it does not execute arbitrary AWK supplied by a client.
+
+## Supported MCP Methods
+
+- `initialize`
+- `notifications/initialized`
+- `tools/list`
+- `tools/call`
+
+The server distinguishes requests, notifications, responses, and protocol errors. JSON-RPC responses sent to the server are ignored, as required for a server-side stdio runtime.
 
 ## Tools
 
-| Tool | Plane | Scopes |
-|------|-------|--------|
-| `ortho_build` | Service | `build.execute` |
-| `ortho_test` | Service | `test.execute` |
-| `ortho_verify_theorem` | Service | `verify.execute` |
-| `ortho_trace` | Fabric | `trace.read` |
-| `ortho_device` | Fabric | `device.read` / `hardware.reset` (elevated) |
-| `ortho_tensor` | Service | `tensor.execute` |
-| `ortho_fabric` | Fabric | `fabric.execute` |
-| `ortho_marketplace` | Service | `marketplace.read` / `write` |
-| `ortho_agent_dispatch` | Intent | `agent.dispatch` |
-| `ortho_workspace` | UI | `workspace.read` / `write` |
+| Tool | Purpose |
+| --- | --- |
+| `awk_count` | Count lines, non-empty lines, and characters |
+| `awk_fields` | Split records into fields using an explicit separator |
+| `awk_filter` | Return lines matching an AWK regular expression |
+| `awk_regex` | Count lines matching an AWK regular expression |
+| `awk_transform` | Apply `upper`, `lower`, or `trim` |
 
-## Setup
+Each tool has an explicit JSON schema in the `tools/list` response.
+
+## Determinism
+
+For the same server state and same request input, tool output is identical.
+
+The core avoids:
+
+- random numbers
+- timestamps in protocol output
+- shell execution from client-controlled input
+- LLM/model inference
+- hidden external service calls
+
+## Running
+
+On Unix-like systems:
 
 ```bash
-npm install
-npm run build
-ORTHO32_TOKEN=<token> ORTHO32_API_URL=https://api.ortho32.local/v1 npm start
+awk -f bin/ortho32-mcp.awk
 ```
 
-Env:
+On this Windows checkout, Git for Windows AWK works:
 
-- `ORTHO32_TOKEN` (or `ORTHO_TOKEN`) — JWT with scopes. Must include `hardware.reset` to reset hardware; default scopes cannot self-escalate.
-- `ORTHO32_API_URL` — base for `ORTHOServiceClient` (default `https://api.ortho32.local/v1`)
+```powershell
+& "C:\Program Files\Git\usr\bin\awk.exe" -f .\bin\ortho32-mcp.awk
+```
 
-### MCP Client Config
+Example request:
 
 ```json
-{
-  "mcpServers": {
-    "ortho32": {
-      "command": "node",
-      "args": ["/path/to/ortho32-mcp/dist/index.js"],
-      "env": {
-        "ORTHO32_TOKEN": "...",
-        "ORTHO32_API_URL": "https://api.ortho32.local/v1"
-      }
-    }
-  }
-}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
 ```
 
-## Resources
+## AWK-Only and AWK + jq Modes
 
-- `ortho://proof/rtl_deterministic`
-- `ortho://trace/cycle/420`
-- `ortho://hardware/device/ortho0`
-- `ortho://workspace/fabric`
+Current implementation: AWK-only.
 
-## Prompts
+The server includes a small deterministic JSON boundary parser tailored to the supported MCP request shapes. `jq` is not required.
 
-- `verify_rtl` — verify theorem via checker
-- `trace_waveform` — trace at cycleNumber
-- `fabric_debug` — four-plane debug
+Future `jq` integration can be added as a boundary utility for broader JSON parsing, but dispatch and tool execution should remain in AWK.
 
-## Test
+## Tests
 
 ```bash
 npm test
 ```
 
-Tests enforce: integer cycles, checker-only status, elevated `hardware.reset`, typed outputs, IntentRouter.
+The test harness drives the AWK server over stdin/stdout and covers:
+
+- `initialize`
+- `notifications/initialized`
+- `tools/list`
+- `tools/call`
+- unknown method
+- unknown tool
+- invalid arguments
+- multiple sequential requests
+- malformed JSON
+- deterministic replay
+- protocol-only stdout
+
+Set a specific AWK executable if needed:
+
+```bash
+AWK=/path/to/awk npm test
+```
+
+## Security Boundary
+
+Client input is treated as untrusted data.
+
+Tool names resolve through explicit dispatch only. The server does not evaluate client-supplied AWK programs and does not interpolate client strings into shell commands.
