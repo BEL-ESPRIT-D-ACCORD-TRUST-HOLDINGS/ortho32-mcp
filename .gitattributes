@@ -1,0 +1,3 @@
+*.awk linguist-language=AWK
+*.mjs linguist-language=JavaScript
+*.ts linguist-detectable=false
